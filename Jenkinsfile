@@ -34,7 +34,7 @@ pipeline {
     stage('Test') {
       steps {
         dir('Micro-Api-Gateway') {
-          sh 'npx jest --coverages'
+          sh 'npx jest --coverage'
         }
       }
     }
