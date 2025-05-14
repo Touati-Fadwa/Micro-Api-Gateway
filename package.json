@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest",
-    "test:ci": "jest --coverage --forceExit",
+    "test:ci": "npm install --include=dev && jest --coverage --ci --forceExit --detectOpenHandles",
     "build": "npm install --only=prod && echo 'API Gateway built successfully'"
   },
   "jest": {
