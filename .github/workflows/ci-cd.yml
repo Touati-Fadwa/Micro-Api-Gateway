@@ -1,0 +1,365 @@
+name: API Gateway CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'api-gateway/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'api-gateway/**'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Nécessaire pour SonarQube
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: api-gateway/package-lock.json
+    
+    - name: Install dependencies
+      run: |
+        cd api-gateway
+        npm ci
+    
+    - name: Run tests
+      run: |
+        cd api-gateway
+        npm test -- --coverage
+    
+    - name: SonarQube Scan
+      uses: SonarSource/sonarcloud-github-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      with:
+        projectBaseDir: api-gateway
+        args: >
+          -Dsonar.projectKey=bibliotheque-api-gateway
+          -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+  build-and-push:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to Docker Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ secrets.DOCKER_REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: ./api-gateway
+        push: true
+        tags: ${{ secrets.DOCKER_REGISTRY }}/bibliotheque-api-gateway:${{ github.sha }},${{ secrets.DOCKER_REGISTRY }}/bibliotheque-api-gateway:latest
+        cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/bibliotheque-api-gateway:latest
+        cache-to: type=inline
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Configure K3s
+      uses: azure/k8s-set-context@v3
+      with:
+        kubeconfig: ${{ secrets.K3S_CONFIG }}
+    
+    - name: Create K3s Deployment and Service
+      run: |
+        # Créer ou mettre à jour le déploiement
+        cat <<EOF | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: bibliotheque-api-gateway
+          namespace: bibliotheque
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: bibliotheque-api-gateway
+          template:
+            metadata:
+              labels:
+                app: bibliotheque-api-gateway
+            spec:
+              containers:
+              - name: api-gateway
+                image: ${{ secrets.DOCKER_REGISTRY }}/bibliotheque-api-gateway:${{ github.sha }}
+                ports:
+                - containerPort: 3001
+                env:
+                - name: PORT
+                  value: "3001"
+                - name: JWT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: bibliotheque-secrets
+                      key: jwt-secret
+                - name: AUTH_SERVICE_URL
+                  value: "http://bibliotheque-auth-service:3002"
+                - name: BOOKS_SERVICE_URL
+                  value: "http://bibliotheque-books-service:3003"
+                resources:
+                  limits:
+                    cpu: "0.3"
+                    memory: "256Mi"
+                  requests:
+                    cpu: "0.1"
+                    memory: "128Mi"
+                readinessProbe:
+                  httpGet:
+                    path: /api/health
+                    port: 3001
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+        EOF
+        
+        # Créer ou mettre à jour le service avec NodePort
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: bibliotheque-api-gateway-service
+          namespace: bibliotheque
+        spec:
+          type: NodePort
+          ports:
+          - port: 3001
+            targetPort: 3001
+            nodePort: 30081
+          selector:
+            app: bibliotheque-api-gateway
+        EOF
+    
+    - name: Verify deployment
+      run: |
+        kubectl rollout status deployment/bibliotheque-api-gateway -n bibliotheque --timeout=180s
+    
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        kubectl rollout undo deployment/bibliotheque-api-gateway -n bibliotheque
+        echo "Deployment failed, rolling back to previous version"
+
+  monitoring:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - name: Configure Prometheus & Grafana
+      run: |
+        echo "Setting up Prometheus and Grafana monitoring for API Gateway"
+        
+        # Créer ou mettre à jour ConfigMap pour Prometheus
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: prometheus-api-gateway-config
+          namespace: monitoring
+        data:
+          prometheus-api-gateway.yml: |
+            - job_name: 'api-gateway'
+              scrape_interval: 15s
+              static_configs:
+                - targets: ['bibliotheque-api-gateway-service.bibliotheque.svc.cluster.local:3001']
+              metrics_path: /metrics
+        EOF
+        
+        # Créer ou mettre à jour ConfigMap pour Grafana
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: grafana-api-gateway-dashboard
+          namespace: monitoring
+        data:
+          api-gateway-dashboard.json: |
+            {
+              "annotations": {
+                "list": []
+              },
+              "editable": true,
+              "gnetId": null,
+              "graphTooltip": 0,
+              "id": null,
+              "links": [],
+              "panels": [
+                {
+                  "aliasColors": {},
+                  "bars": false,
+                  "dashLength": 10,
+                  "dashes": false,
+                  "datasource": "Prometheus",
+                  "fieldConfig": {
+                    "defaults": {
+                      "custom": {}
+                    },
+                    "overrides": []
+                  },
+                  "fill": 1,
+                  "fillGradient": 0,
+                  "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 0
+                  },
+                  "hiddenSeries": false,
+                  "id": 1,
+                  "legend": {
+                    "avg": false,
+                    "current": false,
+                    "max": false,
+                    "min": false,
+                    "show": true,
+                    "total": false,
+                    "values": false
+                  },
+                  "lines": true,
+                  "linewidth": 1,
+                  "nullPointMode": "null",
+                  "options": {
+                    "alertThreshold": true
+                  },
+                  "percentage": false,
+                  "pluginVersion": "7.2.0",
+                  "pointradius": 2,
+                  "points": false,
+                  "renderer": "flot",
+                  "seriesOverrides": [],
+                  "spaceLength": 10,
+                  "stack": false,
+                  "steppedLine": false,
+                  "targets": [
+                    {
+                      "expr": "rate(http_requests_total{job=\"api-gateway\"}[5m])",
+                      "interval": "",
+                      "legendFormat": "",
+                      "refId": "A"
+                    }
+                  ],
+                  "thresholds": [],
+                  "timeFrom": null,
+                  "timeRegions": [],
+                  "timeShift": null,
+                  "title": "Request Rate",
+                  "tooltip": {
+                    "shared": true,
+                    "sort": 0,
+                    "value_type": "individual"
+                  },
+                  "type": "graph",
+                  "xaxis": {
+                    "buckets": null,
+                    "mode": "time",
+                    "name": null,
+                    "show": true,
+                    "values": []
+                  },
+                  "yaxes": [
+                    {
+                      "format": "short",
+                      "label": null,
+                      "logBase": 1,
+                      "max": null,
+                      "min": null,
+                      "show": true
+                    },
+                    {
+                      "format": "short",
+                      "label": null,
+                      "logBase": 1,
+                      "max": null,
+                      "min": null,
+                      "show": true
+                    }
+                  ],
+                  "yaxis": {
+                    "align": false,
+                    "alignLevel": null
+                  }
+                }
+              ],
+              "schemaVersion": 26,
+              "style": "dark",
+              "tags": [],
+              "templating": {
+                "list": []
+              },
+              "time": {
+                "from": "now-6h",
+                "to": "now"
+              },
+              "timepicker": {},
+              "timezone": "",
+              "title": "API Gateway Dashboard",
+              "uid": "api-gateway",
+              "version": 1
+            }
+        EOF
+        
+        # Redémarrer Prometheus pour appliquer les changements
+        kubectl rollout restart deployment prometheus -n monitoring
+        
+        # Importer le dashboard dans Grafana
+        kubectl exec -n monitoring deploy/grafana -- curl -X POST -H "Content-Type: application/json" -d @/etc/grafana/provisioning/dashboards/api-gateway-dashboard.json http://admin:admin@localhost:3000/api/dashboards/db
+
+  k9s-guide:
+    needs: monitoring
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - name: Guide pour travailler avec K9s sur K3s
+      run: |
+        echo "## Guide pour travailler avec K9s sur K3s"
+        echo ""
+        echo "1. Installer K9s: https://k9scli.io/"
+        echo "2. Configurer K9s pour utiliser votre kubeconfig K3s:"
+        echo "   export KUBECONFIG=/chemin/vers/votre/k3s.yaml"
+        echo "3. Lancer K9s: k9s"
+        echo ""
+        echo "Commandes utiles dans K9s:"
+        echo "- :deploy pour voir les déploiements"
+        echo "- :svc pour voir les services"
+        echo "- :pod pour voir les pods"
+        echo "- Ctrl+d pour supprimer une ressource"
+        echo "- Ctrl+k pour tuer un pod"
+        echo "- d pour décrire une ressource"
+        echo "- l pour voir les logs"
+        echo ""
+        echo "Pour accéder à l'API Gateway: http://IP_DU_NOEUD:30081"
+        echo "Pour accéder à Grafana: http://IP_DU_NOEUD:30300 (si configuré sur ce port)"
+        echo "Pour accéder à Prometheus: http://IP_DU_NOEUD:30900 (si configuré sur ce port)"

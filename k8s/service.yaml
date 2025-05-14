@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bibliotheque-api-gateway-service
+  namespace: bibliotheque
+spec:
+  type: NodePort
+  ports:
+  - port: 3001
+    targetPort: 3001
+    nodePort: 30081
+  selector:
+    app: bibliotheque-api-gateway
