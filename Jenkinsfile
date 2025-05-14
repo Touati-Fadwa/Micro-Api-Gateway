@@ -33,8 +33,8 @@ pipeline {
 
     stage('Test') {
       steps {
-        dir('Micro-Api-Gateway') {
-          sh 'npx jest --coverage'
+        dir('microservice-auth') {
+          sh 'npm test -- --coverage'
         }
       }
     }
