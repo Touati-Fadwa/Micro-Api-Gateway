@@ -1,66 +1,68 @@
 pipeline {
-    agent any
-    
-    environment {
-        DOCKER_REGISTRY = credentials('docker-registry-url')
-        DOCKER_CREDENTIALS = credentials('docker-credentials')
-        K3S_CONFIG = credentials('k3s-config')
-        SONAR_TOKEN = credentials('sonar-token')
-        SONAR_ORGANIZATION = credentials('sonar-organization')
+  agent any
+
+  environment {
+    IMAGE_NAME = "touatifadwa/bibliotheque-api-gateway"
+    IMAGE_TAG = "latest"
+    REGISTRY = "docker.io"
+    KUBE_NAMESPACE = "bibliotheque"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
     }
-    
-    stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
+
+    stage('Install') {
+      steps {
+        dir('microservice-auth') {
+          sh 'npm ci'
         }
-        
-        stage('Build and Test') {
-            steps {
-                dir('api-gateway') {
-                    sh 'npm ci'
-                    sh 'npm test -- --coverage'
-                }
-            }
+      }
+    }
+
+    stage('Build') {
+      steps {
+        dir('microservice-auth') {
+          sh 'npm run build'
         }
-        
-        stage('SonarQube Analysis') {
-            steps {
-                dir('api-gateway') {
-                    withSonarQubeEnv('SonarCloud') {
-                        sh """
-                        sonar-scanner \
-                          -Dsonar.projectKey=bibliotheque-api-gateway \
-                          -Dsonar.organization=${SONAR_ORGANIZATION} \
-                          -Dsonar.sources=src \
-                          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
-                        """
-                    }
-                }
-            }
+      }
+    }
+
+    stage('Test') {
+      steps {
+        dir('microservice-auth') {
+          sh 'npm test -- --coverage'
         }
-        
-        stage('Build and Push Docker Image') {
-            steps {
-                dir('api-gateway') {
-                    script {
-                        def imageTag = "${DOCKER_REGISTRY}/bibliotheque-api-gateway:${env.BUILD_NUMBER}"
-                        def latestTag = "${DOCKER_REGISTRY}/bibliotheque-api-gateway:latest"
-                        
-                        sh "docker build -t ${imageTag} -t ${latestTag} ."
-                        
-                        withCredentials([usernamePassword(credentialsId: 'docker-credentials', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USERNAME')]) {
-                            sh "echo ${DOCKER_PASSWORD} | docker login ${DOCKER_REGISTRY} -u ${DOCKER_USERNAME} --password-stdin"
-                            sh "docker push ${imageTag}"
-                            sh "docker push ${latestTag}"
-                        }
-                    }
-                }
-            }
+      }
+    }
+
+    stage('Docker Build') {
+      steps {
+        script {
+          sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f ./Dockerfile ."
         }
-        
-        stage('Deploy to K3s') {
+      }
+    }
+
+    stage('Docker Login & Push') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'docker-hub-credentials',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh '''
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin $REGISTRY
+            docker push ${IMAGE_NAME}:${IMAGE_TAG}
+          '''
+        }
+      }
+    }
+
+     stage('Deploy to K3s') {
             steps {
                 script {
                     // Écrire le fichier kubeconfig
