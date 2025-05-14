@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest",
-    "test:ci": "jest --coverage --ci",
+    "test:ci": "npm install --include=dev && jest --coverage --ci",
     "build": "npm install --only=prod && echo 'API Gateway built successfully'"
   },
   "jest": {

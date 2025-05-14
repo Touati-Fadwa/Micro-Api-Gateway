@@ -34,7 +34,7 @@ pipeline {
     stage('Test') {
       steps {
         dir('microservice-auth') {
-          sh 'npm test -- --coverage'
+          sh 'npm run test:ci'
         }
       }
     }
