@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest",
-    "build": "your-build-command-here"
+    "build": "npm install --only=prod && echo 'API Gateway built successfully'"
   },
   "jest": {
     "setupFilesAfterEnv": [

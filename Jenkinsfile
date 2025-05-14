@@ -17,7 +17,7 @@ pipeline {
 
     stage('Install') {
       steps {
-        dir('microservice-auth') {
+        dir('Micro-Api-Gateway') {
           sh 'npm ci'
         }
       }
@@ -25,7 +25,7 @@ pipeline {
 
     stage('Build') {
       steps {
-        dir('microservice-auth') {
+        dir('Micro-Api-Gateway') {
           sh 'npm run build'
         }
       }
@@ -33,7 +33,7 @@ pipeline {
 
     stage('Test') {
       steps {
-        dir('microservice-auth') {
+        dir('Micro-Api-Gateway') {
           sh 'npm test -- --coverage'
         }
       }
