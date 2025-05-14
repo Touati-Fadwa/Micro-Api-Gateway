@@ -87,7 +87,7 @@ spec:
     spec:
       containers:
       - name: api-gateway
-        image: ${DOCKER_REGISTRY}/bibliotheque-api-gateway:${env.BUILD_NUMBER}
+        image: touatifadwa/bibliotheque-api-gateway:latest
         ports:
         - containerPort: 3001
         env:
