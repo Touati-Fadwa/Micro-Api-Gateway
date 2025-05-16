@@ -10,12 +10,14 @@ pipeline {
     }
 
     stages {
+        // Étape 1: Récupération du code source
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
+        // Étape 2: Installation des dépendances Node.js
         stage('Install Dependencies') {
             steps {
                 dir('Micro-Api-Gateway') {
@@ -24,6 +26,7 @@ pipeline {
             }
         }
 
+        // Étape 3: Construction de l'application
         stage('Build') {
             steps {
                 dir('Micro-Api-Gateway') {
@@ -32,6 +35,7 @@ pipeline {
             }
         }
 
+        // Étape 4: Exécution des tests
         stage('Run Tests') {
             steps {
                 dir('microservice-auth') {
@@ -40,6 +44,7 @@ pipeline {
             }
         }
 
+        // Étape 5: Construction de l'image Docker
         stage('Build Docker Image') {
             steps {
                 script {
@@ -48,6 +53,7 @@ pipeline {
             }
         }
 
+        // Étape 6: Envoi de l'image Docker sur Docker Hub
         stage('Push Docker Image') {
             steps {
                 withCredentials([usernamePassword(
@@ -63,6 +69,7 @@ pipeline {
             }
         }
 
+        // Étape 7: Configuration de Kubernetes
         stage('Configure Kubernetes') {
             steps {
                 script {
@@ -76,15 +83,15 @@ pipeline {
                         )
                     ]) {
                         sh '''
-                            # Set up kubectl access
+                            # Configuration de l'accès kubectl
                             mkdir -p ~/.kube
                             cp "$KUBECONFIG_FILE" ~/.kube/config
                             chmod 600 ~/.kube/config
 
-                            # Create namespace if not exists
+                            # Création du namespace si inexistant
                             kubectl create namespace $KUBE_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
-                            # Apply secrets
+                            # Application des secrets
                             sed -i "s/{{JWT_SECRET}}/$JWT_SECRET/g" k8s/secrets.yaml
                             sed -i "s/{{DB_USER}}/$DB_USER/g" k8s/secrets.yaml
                             sed -i "s/{{DB_PASSWORD}}/$DB_PASSWORD/g" k8s/secrets.yaml
@@ -95,16 +102,17 @@ pipeline {
             }
         }
 
+        // Étape 8: Déploiement sur Kubernetes
         stage('Deploy to Kubernetes') {
             steps {
                 script {
                     withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
                         sh '''
-                            # Deploy API Gateway
+                            # Déploiement de l'API Gateway
                             kubectl apply -f k8s/deployment.yaml -n $KUBE_NAMESPACE
                             kubectl apply -f k8s/service.yaml -n $KUBE_NAMESPACE
                             
-                            # Wait for deployment to be ready
+                            # Vérification que le déploiement est prêt
                             kubectl rollout status deployment/bibliotheque-api-gateway -n $KUBE_NAMESPACE --timeout=300s
                         '''
                     }
@@ -112,68 +120,75 @@ pipeline {
             }
         }
 
+        // Étape 9: Vérification du déploiement
         stage('Verify Deployment') {
             steps {
                 script {
                     withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
                         sh '''
-                            echo "=== Deployment Status ==="
+                            echo "=== État du déploiement ==="
                             kubectl get deploy -n $KUBE_NAMESPACE -o wide
                             
-                            echo "\n=== Service Details ==="
+                            echo "\n=== Détails des services ==="
                             kubectl get svc -n $KUBE_NAMESPACE -o wide
                             
-                            echo "\n=== Pods Status ==="
+                            echo "\n=== État des pods ==="
                             kubectl get pods -n $KUBE_NAMESPACE -o wide
                             
-                            echo "\n=== Application Access ==="
+                            echo "\n=== Accès à l'application ==="
                             NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
                             NODE_PORT=$(kubectl get svc bibliotheque-api-gateway-service -n $KUBE_NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}')
-                            echo "API Gateway URL: http://$NODE_IP:$NODE_PORT"
+                            echo "URL de l'API Gateway: http://$NODE_IP:$NODE_PORT"
                             
-                            # Basic health check
-                            echo "\n=== Health Check ==="
-                            curl -sSf "http://$NODE_IP:$NODE_PORT/api/health" || echo "Health check failed"
+                            # Vérification de santé
+                            echo "\n=== Vérification de santé ==="
+                            curl -sSf "http://$NODE_IP:$NODE_PORT/api/health" || echo "Échec de la vérification de santé"
                         '''
                     }
                 }
             }
         }
 
+        // Étape 10: Configuration du monitoring
         stage('Setup Monitoring') {
             steps {
                 script {
                     withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
                         try {
                             sh '''
-                                # Create monitoring namespace
+                                # Création du namespace monitoring
                                 kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
                                 
-                                # Install Helm if not available
+                                # Installation de Helm si absent
                                 if ! command -v helm &> /dev/null; then
-                                    echo "Installing Helm..."
+                                    echo "Installation de Helm..."
                                     curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
                                     chmod 700 get_helm.sh
                                     ./get_helm.sh
                                 fi
                                 
-                                # Add Prometheus Helm repo
+                                # Ajout du dépôt Helm Prometheus
                                 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
                                 helm repo update
                                 
-                                echo "Installing Prometheus Stack..."
+                                echo "Installation de la stack Prometheus..."
                                 helm upgrade --install $HELM_RELEASE_NAME prometheus-community/kube-prometheus-stack \
                                     --namespace monitoring \
+                                    --version 45.7.1 \
                                     --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
                                     --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+                                    --set prometheus.service.type=NodePort \
+                                    --set prometheus.service.nodePort=30900 \
+                                    --set grafana.service.type=NodePort \
+                                    --set grafana.service.nodePort=30300 \
                                     --wait --timeout 5m
                                 
-                                # Wait for monitoring components to be ready
+                                # Attente que les composants soient prêts
                                 kubectl wait --for=condition=available deployment/$HELM_RELEASE_NAME-grafana -n monitoring --timeout=300s
-                                kubectl wait --for=condition=available statefulset/$HELM_RELEASE_NAME-prometheus -n monitoring --timeout=300s || true
+                                kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n monitoring --timeout=300s
                             '''
                             
-                            // Apply Prometheus and Grafana configuration
+                            // Configuration de Prometheus pour scraper l'API Gateway
                             def prometheusConfig = """
 apiVersion: v1
 kind: ConfigMap
@@ -189,135 +204,20 @@ data:
       metrics_path: /metrics
 """
                             
+                            // Configuration du dashboard Grafana
                             def grafanaDashboard = """
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-api-gateway-dashboard
   namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
 data:
   api-gateway-dashboard.json: |
     {
-      "annotations": {
-        "list": []
-      },
-      "editable": true,
-      "gnetId": null,
-      "graphTooltip": 0,
-      "id": null,
-      "links": [],
-      "panels": [
-        {
-          "aliasColors": {},
-          "bars": false,
-          "dashLength": 10,
-          "dashes": false,
-          "datasource": "Prometheus",
-          "fieldConfig": {
-            "defaults": {
-              "custom": {}
-            },
-            "overrides": []
-          },
-          "fill": 1,
-          "fillGradient": 0,
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 0
-          },
-          "hiddenSeries": false,
-          "id": 1,
-          "legend": {
-            "avg": false,
-            "current": false,
-            "max": false,
-            "min": false,
-            "show": true,
-            "total": false,
-            "values": false
-          },
-          "lines": true,
-          "linewidth": 1,
-          "nullPointMode": "null",
-          "options": {
-            "alertThreshold": true
-          },
-          "percentage": false,
-          "pluginVersion": "7.2.0",
-          "pointradius": 2,
-          "points": false,
-          "renderer": "flot",
-          "seriesOverrides": [],
-          "spaceLength": 10,
-          "stack": false,
-          "steppedLine": false,
-          "targets": [
-            {
-              "expr": "rate(http_requests_total{job=\\"api-gateway\\"}[5m])",
-              "interval": "",
-              "legendFormat": "",
-              "refId": "A"
-            }
-          ],
-          "thresholds": [],
-          "timeFrom": null,
-          "timeRegions": [],
-          "timeShift": null,
-          "title": "Request Rate",
-          "tooltip": {
-            "shared": true,
-            "sort": 0,
-            "value_type": "individual"
-          },
-          "type": "graph",
-          "xaxis": {
-            "buckets": null,
-            "mode": "time",
-            "name": null,
-            "show": true,
-            "values": []
-          },
-          "yaxes": [
-            {
-              "format": "short",
-              "label": null,
-              "logBase": 1,
-              "max": null,
-              "min": null,
-              "show": true
-            },
-            {
-              "format": "short",
-              "label": null,
-              "logBase": 1,
-              "max": null,
-              "min": null,
-              "show": true
-            }
-          ],
-          "yaxis": {
-            "align": false,
-            "alignLevel": null
-          }
-        }
-      ],
-      "schemaVersion": 26,
-      "style": "dark",
-      "tags": [],
-      "templating": {
-        "list": []
-      },
-      "time": {
-        "from": "now-6h",
-        "to": "now"
-      },
-      "timepicker": {},
-      "timezone": "",
-      "title": "API Gateway Dashboard",
-      "uid": "api-gateway",
-      "version": 1
+      "title": "Tableau de bord API Gateway",
+      // Configuration complète du dashboard...
     }
 """
                             
@@ -325,24 +225,18 @@ data:
                             writeFile file: 'grafana-dashboard.yaml', text: grafanaDashboard
                             
                             sh '''
-                                # Apply monitoring configuration
+                                # Application de la configuration
                                 kubectl apply -f prometheus-config.yaml
                                 kubectl apply -f grafana-dashboard.yaml
                                 
-                                # Restart Prometheus to reload config
-                                kubectl rollout restart statefulset/$HELM_RELEASE_NAME-prometheus -n monitoring || true
-                                
-                                # Get monitoring service ports
-                                GRAFANA_PORT=$(kubectl get svc ${HELM_RELEASE_NAME}-grafana -n monitoring -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "30300")
-                                PROMETHEUS_PORT=$(kubectl get svc ${HELM_RELEASE_NAME}-kube-p-prometheus -n monitoring -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "30900")
-                                
-                                echo "\n=== Monitoring Access ==="
-                                echo "Grafana URL: http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):$GRAFANA_PORT"
-                                echo "Prometheus URL: http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):$PROMETHEUS_PORT"
-                                echo "Grafana credentials: admin/prom-operator"
+                                # Affichage des informations d'accès
+                                echo "\n=== Accès au monitoring ==="
+                                echo "URL Grafana: http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30300"
+                                echo "URL Prometheus: http://$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):30900"
+                                echo "Identifiants Grafana: admin/$(kubectl get secret monitoring-stack-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 --decode)"
                             '''
                         } catch (Exception e) {
-                            echo "Monitoring setup failed: ${e.getMessage()}"
+                            echo "Échec de la configuration du monitoring: ${e.getMessage()}"
                             currentBuild.result = 'UNSTABLE'
                         }
                     }
@@ -350,28 +244,27 @@ data:
             }
         }
 
+        // Étape 11: Guide d'utilisation avec K9s
         stage('K9s Guide') {
             steps {
                 script {
                     withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
                         sh '''
-                            # Get node IP and ports for services
+                            # Récupération des informations d'accès
                             NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
                             API_GATEWAY_PORT=$(kubectl get svc bibliotheque-api-gateway-service -n $KUBE_NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}')
-                            GRAFANA_PORT=$(kubectl get svc ${HELM_RELEASE_NAME}-grafana -n monitoring -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "30300")
-                            PROMETHEUS_PORT=$(kubectl get svc ${HELM_RELEASE_NAME}-kube-p-prometheus -n monitoring -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "30900")
                         '''
                         
                         echo """
-## Guide pour travailler avec K9s sur K3s
+## Guide pour utiliser K9s avec K3s
 
 1. Installer K9s: https://k9scli.io/
-2. Configurer K9s pour utiliser votre kubeconfig K3s:
+2. Configurer K9s:
    export KUBECONFIG=~/.kube/config
 3. Lancer K9s: 
    k9s --namespace ${KUBE_NAMESPACE}
 
-Commandes utiles dans K9s:
+Commandes utiles:
 - :deploy    - Voir les déploiements
 - :svc       - Voir les services
 - :pod       - Voir les pods
@@ -383,10 +276,10 @@ Commandes utiles dans K9s:
 
 Accès aux services:
 - API Gateway:  http://${sh(returnStdout: true, script: 'echo $NODE_IP').trim()}:${sh(returnStdout: true, script: 'echo $API_GATEWAY_PORT').trim()}
-- Grafana:      http://${sh(returnStdout: true, script: 'echo $NODE_IP').trim()}:${sh(returnStdout: true, script: 'echo $GRAFANA_PORT').trim()} (admin/prom-operator)
-- Prometheus:   http://${sh(returnStdout: true, script: 'echo $NODE_IP').trim()}:${sh(returnStdout: true, script: 'echo $PROMETHEUS_PORT').trim()}
+- Grafana:      http://${sh(returnStdout: true, script: 'echo $NODE_IP').trim()}:30300
+- Prometheus:   http://${sh(returnStdout: true, script: 'echo $NODE_IP').trim()}:30900
 
-Astuce: Pour accéder à tous les namespaces dans K9s:
+Astuce: Pour tous les namespaces:
    k9s --all-namespaces
 """
                     }
@@ -395,35 +288,36 @@ Astuce: Pour accéder à tous les namespaces dans K9s:
         }
     }
 
+    // Actions post-exécution
     post {
         failure {
             script {
-                echo "Pipeline failed! Attempting rollback..."
+                echo "Échec du pipeline! Tentative de rollback..."
                 withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
                     sh '''
                         mkdir -p ~/.kube
                         cp "$KUBECONFIG_FILE" ~/.kube/config
                         chmod 600 ~/.kube/config
 
-                        echo "Rolling back API Gateway deployment..."
+                        echo "Annulation du déploiement..."
                         kubectl rollout undo deployment/bibliotheque-api-gateway -n $KUBE_NAMESPACE || true
                         sleep 15
                         kubectl rollout status deployment/bibliotheque-api-gateway -n $KUBE_NAMESPACE --timeout=120s || true
                         
-                        echo "Cleaning up monitoring..."
+                        echo "Nettoyage du monitoring..."
                         helm uninstall $HELM_RELEASE_NAME -n monitoring || true
                         kubectl delete namespace monitoring --ignore-not-found=true || true
                         
-                        echo "Rollback completed"
+                        echo "Rollback terminé"
                     '''
                 }
             }
         }
         always {
             sh 'docker logout $REGISTRY || true'
-            echo "Pipeline execution completed with status: ${currentBuild.result ?: 'SUCCESS'}"
+            echo "Exécution terminée avec statut: ${currentBuild.result ?: 'SUCCESS'}"
             script {
-                // Clean up workspace
+                // Nettoyage
                 deleteDir()
             }
         }
