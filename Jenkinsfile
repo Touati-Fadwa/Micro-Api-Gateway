@@ -120,9 +120,8 @@ pipeline {
         script {
           withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
             sh '''
-              # Commande simplifiée avec le namespace directement spécifié
-              kubectl apply -f k8s/deployment.yaml -n bibliotheque
-              kubectl apply -f k8s/service.yaml -n bibliotheque
+              kubectl apply -f k8s/deployment.yaml -n $KUBE_NAMESPACE
+              kubectl apply -f k8s/service.yaml -n $KUBE_NAMESPACE
             '''
           }
         }
@@ -134,7 +133,6 @@ pipeline {
         script {
           withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
             sh '''
-              # Display deployment information
               echo "=== Deployment Status ==="
               kubectl get deploy -n $KUBE_NAMESPACE
               
@@ -144,7 +142,6 @@ pipeline {
               echo "=== Pods Status ==="
               kubectl get pods -n $KUBE_NAMESPACE
               
-              # Generate access URL
               echo "Application accessible via:"
               NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
               NODE_PORT=$(kubectl get svc bibliotheque-api-gateway-service -n $KUBE_NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}')
@@ -158,8 +155,14 @@ pipeline {
     stage('Configure Monitoring') {
       steps {
         script {
-          // Créer ConfigMap pour Prometheus
-          def prometheusConfigYaml = """
+          withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
+            sh '''
+              # Create monitoring namespace if not exists
+              kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+            '''
+            
+            // Prometheus ConfigMap
+            def prometheusConfig = """
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -173,9 +176,9 @@ data:
         - targets: ['bibliotheque-api-gateway-service.bibliotheque.svc.cluster.local:3001']
       metrics_path: /metrics
 """
-                    
-          // Créer ConfigMap pour Grafana
-          def grafanaDashboardYaml = """
+            
+            // Grafana Dashboard ConfigMap
+            def grafanaDashboard = """
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -306,52 +309,23 @@ data:
       "version": 1
     }
 """
-                    
-          // Écrire les fichiers YAML
-          writeFile file: 'prometheus-config.yaml', text: prometheusConfigYaml
-          writeFile file: 'grafana-dashboard.yaml', text: grafanaDashboardYaml
-                    
-          // Appliquer les ConfigMaps
-          sh "KUBECONFIG=kubeconfig.yaml kubectl apply -f prometheus-config.yaml"
-          sh "KUBECONFIG=kubeconfig.yaml kubectl apply -f grafana-dashboard.yaml"
-                    
-          // Redémarrer Prometheus pour appliquer les changements
-          sh "KUBECONFIG=kubeconfig.yaml kubectl rollout restart deployment prometheus -n monitoring"
-                    
-          // Importer le dashboard dans Grafana
-          sh """
-          KUBECONFIG=kubeconfig.yaml kubectl exec -n monitoring deploy/grafana -- curl -X POST \
-          -H "Content-Type: application/json" \
-          -d @/etc/grafana/provisioning/dashboards/api-gateway-dashboard.json \
-          http://admin:admin@localhost:3000/api/dashboards/db
-          """
+            
+            writeFile file: 'prometheus-config.yaml', text: prometheusConfig
+            writeFile file: 'grafana-dashboard.yaml', text: grafanaDashboard
+            
+            sh '''
+              # Apply monitoring configuration
+              kubectl apply -f prometheus-config.yaml --validate=false
+              kubectl apply -f grafana-dashboard.yaml
+              
+              # Restart Prometheus to load new config
+              kubectl rollout restart deployment prometheus -n monitoring || echo "Prometheus deployment not found"
+              
+              # Wait for Grafana to be ready
+              kubectl wait --for=condition=available deployment/grafana -n monitoring --timeout=120s || echo "Grafana not found"
+            '''
+          }
         }
-      }
-    }
-        
-    stage('K9s Guide') {
-      steps {
-        echo """
-## Guide pour travailler avec K9s sur K3s
-
-1. Installer K9s: https://k9scli.io/
-2. Configurer K9s pour utiliser votre kubeconfig K3s:
-   export KUBECONFIG=/chemin/vers/votre/k3s.yaml
-3. Lancer K9s: k9s
-
-Commandes utiles dans K9s:
-- :deploy pour voir les déploiements
-- :svc pour voir les services
-- :pod pour voir les pods
-- Ctrl+d pour supprimer une ressource
-- Ctrl+k pour tuer un pod
-- d pour décrire une ressource
-- l pour voir les logs
-
-Pour accéder à l'API Gateway: http://IP_DU_NOEUD:30081
-Pour accéder à Grafana: http://IP_DU_NOEUD:30300 (si configuré sur ce port)
-Pour accéder à Prometheus: http://IP_DU_NOEUD:30900 (si configuré sur ce port)
-"""
       }
     }
   }
@@ -362,15 +336,15 @@ Pour accéder à Prometheus: http://IP_DU_NOEUD:30900 (si configuré sur ce port
         echo "Pipeline failed! Attempting rollback..."
         withCredentials([file(credentialsId: 'K3S_CONFIG', variable: 'KUBECONFIG_FILE')]) {
           sh '''
-            # Configure kubectl access
             mkdir -p ~/.kube
             cp "$KUBECONFIG_FILE" ~/.kube/config
             chmod 600 ~/.kube/config
 
-            echo "!!! Deployment failed - Initiating rollback !!!"
-            kubectl rollout undo deployment/bibliotheque-auth -n $KUBE_NAMESPACE || true
-            kubectl rollout status deployment/bibliotheque-auth -n $KUBE_NAMESPACE --timeout=120s || true
-            echo "Rollback to previous version completed"
+            echo "Rolling back API Gateway deployment..."
+            kubectl rollout undo deployment/bibliotheque-api-gateway -n $KUBE_NAMESPACE || true
+            sleep 15
+            kubectl rollout status deployment/bibliotheque-api-gateway -n $KUBE_NAMESPACE --timeout=120s || true
+            echo "Rollback completed"
           '''
         }
       }
