@@ -53,17 +53,31 @@ app.use(
   })
 );
 
+// Books Service - Sans vérification de token
 app.use(
   "/api/books",
-  verifyToken,
   createProxyMiddleware({
     target: process.env.BOOKS_SERVICE_URL || "http://localhost:3003",
     pathRewrite: {
       "^/api/books": "/api",
     },
     changeOrigin: true,
+    onProxyReq: (proxyReq, req) => {
+      if (req.body) {
+        const bodyData = JSON.stringify(req.body)
+        proxyReq.setHeader("Content-Type", "application/json")
+        proxyReq.setHeader("Content-Length", Buffer.byteLength(bodyData))
+        proxyReq.write(bodyData)
+      }
+    },
+    proxyTimeout: 10000,
+    onError: (err, req, res) => {
+      console.error("Books Proxy Error:", err)
+      res.status(502).json({ error: "Books Service Unavailable" })
+    },
   }),
 )
+
 
 // Error handling
 app.use((err, req, res, next) => {
