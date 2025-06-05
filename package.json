@@ -6,9 +6,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest",
-    
-    "build": "npm install --only=prod && echo 'API Gateway built successfully'"
+    "build": "echo 'API Gateway built successfully'",
+    "test": "jest"
   },
   
   "dependencies": {
