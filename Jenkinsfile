@@ -37,7 +37,7 @@ pipeline {
         // Étape 4: Exécution des tests
         stage('Run Tests') {
             steps {
-                dir('microservice-auth') {
+                dir('Micro-Api-Gateway') {
                     sh 'npm run test'
                 }
             }
